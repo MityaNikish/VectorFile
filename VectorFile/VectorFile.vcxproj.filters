@@ -13,6 +13,7 @@
     <ClCompile Include="vector_file_only_read.hpp">
       <Filter>resurses</Filter>
     </ClCompile>
-    <ClCompile Include="vector_file.hpp" />
+    <ClCompile Include="VectorFile.hpp" />
+    <ClCompile Include="VectorFile.cpp" />
   </ItemGroup>
 </Project>

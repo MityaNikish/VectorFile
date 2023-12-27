@@ -1,5 +1,6 @@
 #include "pch.h"
-#include "vector_file.hpp"
+#include "VectorFile.hpp"
+#include "unordered_map"
 
 
 class MyType final
@@ -15,12 +16,16 @@ public:
 	MyType& operator=(const MyType&) = default;
 	MyType(MyType&&) noexcept = default;
 	MyType& operator=(MyType&&) noexcept = default;
+	bool operator==(const MyType&) const = default;
 	~MyType() = default;
 };
 
 
 TEST(OpenFiles, Read)
 {
+	//std::unordered_map<>
+
+
 	auto p = std::filesystem::temp_directory_path() / "temp.bin";
 	{
 		VectorFile<uint8_t> vec(p, static_cast<size_t>(32));
@@ -397,6 +402,27 @@ TEST(Move, Test2)
 }
 
 
+TEST(Move, Test3)
+{
+	auto p = std::filesystem::current_path() / "temp.bin";
+	{
+		VectorFile<uint8_t> vec(p, static_cast<size_t>(64));
+		for (size_t i = 0; i < vec.size_file(); i++)
+		{
+			vec[i] = static_cast<uint8_t>(i + 100);
+		}
+		vec.flush();
+		EXPECT_EQ(vec.size_file(), 64);
+	}
+	{
+		VectorFile<uint8_t> vec_new(VectorFile<uint8_t>{p});
+		VectorFile<uint8_t> vec_new2(VectorFile<uint8_t>{p});
+		vec_new2 = std::move(vec_new);
+		EXPECT_EQ(vec_new.size_file(), 64);
+	}
+}
+
+
 TEST(AllFunctionality, _)
 {
 	auto p = std::filesystem::temp_directory_path() / "temp.bin";
@@ -465,6 +491,32 @@ TEST(AllFunctionality, _)
 }
 
 
+TEST(Iteration, _)
+{
+	auto p = std::filesystem::temp_directory_path() / "temp.bin";
+	{
+		VectorFile<uint8_t> vec(p, static_cast<size_t>(64));
+
+		EXPECT_EQ(vec.size_file(), 64);
+
+		for (size_t i = 0; i < vec.size_file(); i++)
+		{
+			vec[i] = static_cast<uint8_t>(i);
+		}
+		vec.flush();
+
+
+		int i = 0;
+		for (auto iter: vec)
+		{
+			EXPECT_EQ(iter, i);
+			i++;
+		}
+	}
+
+	std::filesystem::remove(p);
+}
+
 //TEST(Iterator, Test1)
 //{
 //	auto p = std::filesystem::current_path() / "temp.bin";
@@ -485,6 +537,35 @@ TEST(AllFunctionality, _)
 //		for (auto iter : vec)
 //		{
 //			EXPECT_EQ(iter, 10);
+//		}
+//	}
+//}
+
+
+//TEST(Iterator, Test1)
+//{
+//	auto p = std::filesystem::current_path() / "temp.bin";
+//	{
+//		VectorFile<uint8_t> vec(p, static_cast<size_t>(64));
+//		for (size_t i = 0; i < vec.size_file(); i++)
+//		{
+//			vec[i] = static_cast<uint8_t>(i);
+//		}
+//		vec.flush();
+//		EXPECT_EQ(vec.size_file(), 64);
+//	}
+//	{
+//		VectorFile<uint8_t> vec(p, false);
+//		EXPECT_EQ(vec.size_file(), 64);
+//		for (size_t i = 0; i < vec.size_file(); i++)
+//		{
+//			EXPECT_EQ(vec[i], i);
+//		}
+//		size_t i = 0;
+//		for (auto iter : vec)
+//		{
+//			EXPECT_EQ(iter, i);
+//			i++;
 //		}
 //	}
 //}

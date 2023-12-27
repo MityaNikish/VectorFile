@@ -2,17 +2,46 @@
 #include <fstream>
 #include <vector>
 #include <filesystem>
+#include <iterator>
 #include "vector_file_exception.hpp"
 
 
 template <typename T>
-concept Acceptable = std::is_trivially_copyable_v<T> && std::is_default_constructible_v<T> && std::is_move_constructible_v<T> && !std::is_const_v<T>;
+struct Serializer
+{
+	static void serialization(std::fstream& file, T& elem)
+	{
+		file.write(reinterpret_cast<char*>(&elem), sizeof(T));
+	}
 
+	static void deserialization(std::fstream& file, T& elem)
+	{
+		file.read(reinterpret_cast<char*>(&elem), sizeof(T));
+	}
 
-template <Acceptable T>
+	static size_t get_size_element(std::fstream& file)
+	{
+		return sizeof(T);
+	}
+};
+
+//template <typename T>
+//concept Acceptable = std::is_trivially_copyable_v<T> && std::is_default_constructible_v<T> && std::is_move_constructible_v<T> && !std::is_const_v<T>;
+
+template <typename T>
+concept Acceptable = std::is_move_constructible_v<T> && !std::is_const_v<T>;
+
+//template <typename T, typename Args>
+//concept AcceptableSerialization = requires()
+//{
+//	T::serialization(std::declval<Args>() ...);
+//	T::deserialization(std::declval<Args>() ...);
+//};
+
+template <Acceptable T, class S = Serializer<T>>
 class VectorFile final
 {
-	const size_t type_size_ = sizeof(T);	//размер типа (байт)
+	static const size_t type_size_ = sizeof(T);	//размер типа (байт)
 	bool is_write_;							//флаг чтение-запись/чтение
 	std::fstream file_;						//файл
 	std::filesystem::path path_;			//путь к файлу
@@ -48,8 +77,7 @@ public:
 	explicit VectorFile(std::filesystem::path path, size_t file_size, size_t window_size = 1024)
 		: is_write_(true), path_(std::move(path)), file_size_(0), target_window_size_(window_size), offset_window_(0)
 	{
-		const size_t number_elem = file_size / type_size_;
-		target_file_size_ = number_elem * type_size_;
+		target_file_size_ = align_filesize_to_typesize(file_size);
 
 		file_.open(path_, std::ios::in | std::ios::out | std::ios::binary | std::ios::trunc);
 
@@ -80,7 +108,7 @@ public:
 	}
 
 	VectorFile(VectorFile&&) noexcept = default;
-	VectorFile& operator=(VectorFile&&) = delete;
+	VectorFile& operator=(VectorFile&&) = default;
 	VectorFile(const VectorFile&) = delete;
 	VectorFile& operator=(const VectorFile&) = delete;
 
@@ -189,7 +217,7 @@ public:
 	void resize(size_t new_file_size)
 	{
 		size_t old_file_size = target_file_size_;
-		target_file_size_ = new_file_size / type_size_ * type_size_;
+		target_file_size_ = align_filesize_to_typesize(new_file_size);
 
 		if (new_file_size >= old_file_size)
 		{
@@ -201,31 +229,69 @@ public:
 		}
 	}
 
-	typedef typename std::vector<T>::iterator iterator;
-	typedef typename std::vector<T>::const_iterator const_iterator;
-
-	iterator begin() noexcept
+	class FileIterator
 	{
-		return iterator(buffer_.begin());
+		std::fstream& file_;
+		size_t pos_;
+
+		FileIterator(std::fstream& file, size_t pos) : file_(file), pos_(pos) {}
+
+	public:
+		friend class VectorFile;
+
+		using iterator_category = std::input_iterator_tag;
+		using value_type = T;
+		using difference_type = std::ptrdiff_t;
+		using pointer = T*;
+		using reference = T&;
+
+		bool operator!=(const FileIterator& other) const
+		{
+			return pos_ != other.pos_;
+		}
+
+		FileIterator& operator++()
+		{
+			pos_ += S::get_size_element(file_);
+			return *this;
+		}
+
+		T operator*()
+		{
+			file_.seekg(pos_);
+			T value;
+			S::deserialization(file_, value);
+			return value;
+		}
+	};
+
+	FileIterator begin()
+	{
+		return FileIterator(file_, 0);
 	}
 
-	iterator end() noexcept
+	FileIterator end()
 	{
-		return iterator(buffer_.end());
+		return FileIterator(file_, file_size_);
 	}
 
-
-	const_iterator begin() const noexcept
+	const FileIterator begin() const
 	{
-		return const_iterator(buffer_.begin());
+		return FileIterator(file_, 0);
 	}
 
-	const_iterator end() const noexcept
+	const FileIterator end() const
 	{
-		return const_iterator(buffer_.end());
+		return FileIterator(file_, file_size_);
 	}
+
 
 private:
+	void default_serialization(std::fstream file_, T elem)
+	{
+		file_.write(reinterpret_cast<char*>(&elem), type_size_);
+	}
+
 	void read()
 	{
 		buffer_.clear();
@@ -236,9 +302,12 @@ private:
 		for (size_t i = 0; i < number_elem; i++)
 		{
 			T obj;
-			file_.read(reinterpret_cast<char*>(&obj), type_size_);
+			S::deserialization(file_, obj);
+			//file_.read(reinterpret_cast<char*>(&obj), type_size_);
 			buffer_.push_back(obj);
 		}
+
+
 	}
 
 	void write()
@@ -247,7 +316,8 @@ private:
 		file_.seekp(offset_window_, std::ios::beg);
 		for (size_t i = 0; i < buffer_.size(); i++)
 		{
-			file_.write(reinterpret_cast<char*>(&buffer_[i]), type_size_);
+			S::serialization(file_, buffer_[i]);
+			//file_.write(reinterpret_cast<char*>(&buffer_[i]), type_size_);
 		}
 	}
 
@@ -264,11 +334,15 @@ private:
 		file_.clear();
 		file_.seekp(0, std::ios::end);
 
-		T obj;
 		for (size_t i = 0; i < number_elem * type_size_; i++)
 		{
 			file_.write("\0", 1);
 		}
 		file_size_ += number_elem * type_size_;
+	}
+
+	size_t align_filesize_to_typesize(size_t original_file_size) const
+	{
+		return original_file_size / type_size_ * type_size_;
 	}
 };

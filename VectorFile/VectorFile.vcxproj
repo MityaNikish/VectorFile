@@ -131,9 +131,10 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="VectorFile.cpp" />
     <ClCompile Include="vector_file_exception.hpp" />
     <ClCompile Include="vector_file_only_read.hpp" />
-    <ClCompile Include="vector_file.hpp" />
+    <ClCompile Include="VectorFile.hpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
