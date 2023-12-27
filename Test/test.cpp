@@ -517,6 +517,47 @@ TEST(Iteration, _)
 	std::filesystem::remove(p);
 }
 
+TEST(Shift, _)
+{
+	auto p = std::filesystem::temp_directory_path() / "temp.bin";
+	{
+		VectorFile<uint8_t> vec(p, static_cast<size_t>(64));
+
+		EXPECT_EQ(vec.size_file(), 64);
+
+		for (size_t i = 0; i < vec.size_file(); i++)
+		{
+			vec[i] = static_cast<uint8_t>(i);
+		}
+		vec.flush();
+
+		vec.shift(0, 32);
+
+		EXPECT_EQ(vec.size_file(), 96);
+
+		for (size_t i = 0; i < 32; i++)
+		{
+			vec[i] = static_cast<uint8_t>(i);
+		}
+		vec.flush();
+
+
+		for (size_t i = 0; i < vec.size_file(); i++)
+		{
+			EXPECT_EQ(vec[i], i);
+		}
+
+		//int i = 0;
+		//for (auto iter : vec)
+		//{
+		//	EXPECT_EQ(iter, i);
+		//	i++;
+		//}
+	}
+
+	std::filesystem::remove(p);
+}
+
 //TEST(Iterator, Test1)
 //{
 //	auto p = std::filesystem::current_path() / "temp.bin";
