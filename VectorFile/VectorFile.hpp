@@ -9,9 +9,9 @@
 template <typename T>
 struct Serializer
 {
-	static void serialization(std::fstream& file, T& elem)
+	static void serialization(std::fstream& file, const T& elem)
 	{
-		file.write(reinterpret_cast<char*>(&elem), sizeof(T));
+		file.write(reinterpret_cast<const char*>(&elem), sizeof(T));
 	}
 
 	static void deserialization(std::fstream& file, T& elem)
@@ -19,44 +19,50 @@ struct Serializer
 		file.read(reinterpret_cast<char*>(&elem), sizeof(T));
 	}
 
-	static size_t get_size_element(const std::fstream& file)
+	static size_t deserialization_size_element(std::fstream& file)
+	{
+		return sizeof(T);
+	}
+
+	static size_t get_size_element(const T& elem)
 	{
 		return sizeof(T);
 	}
 };
 
-//template <typename T>
-//concept Acceptable = std::is_trivially_copyable_v<T> && std::is_default_constructible_v<T> && std::is_move_constructible_v<T> && !std::is_const_v<T>;
 
 template <typename T>
 concept Acceptable = std::is_move_constructible_v<T> && !std::is_const_v<T>;
 
-//template <typename T, typename Args>
-//concept AcceptableSerialization = requires()
-//{
-//	T::serialization(std::declval<Args>() ...);
-//	T::deserialization(std::declval<Args>() ...);
-//};
+
+template <typename S, typename Arg>
+concept AcceptableSerialization = requires(std::fstream& file, Arg& value)
+{
+	S::serialization(file, value);
+	S::deserialization(file, value);
+	S::deserialization_size_element(file);
+	S::get_size_element(value);
+};
+
 
 template <Acceptable T, class S = Serializer<T>>
+requires AcceptableSerialization<S, T>
 class VectorFile final
 {
-	static const size_t type_size_ = sizeof(T);	//размер типа (байт)
-	bool is_write_;							//флаг чтение-запись/чтение
+	bool is_writable_;							//флаг чтение-запись/чтение
 	std::fstream file_;						//файл
 	std::filesystem::path path_;			//путь к файлу
-	size_t file_size_;						//временный размер файла (байт)
-	size_t target_file_size_;				//целевой размер файла (байт)
-	size_t target_window_size_;				//ширина окна (байт)
-	size_t offset_window_;					//смещение окна от начала (байт)
+	std::streamsize window_size_;				//ширина окна (байт)
+	std::streampos pos_window_;					//смещение окна от начала (байт)
+	std::streamoff offset_end;          //смещение с конца(байт)
 	std::vector<T> buffer_;					//буфер элиментов окна
 
 public:
 	explicit VectorFile(std::filesystem::path path, bool is_write = false, size_t window_size = 1024)
-		: is_write_(is_write), path_(std::move(path)), target_window_size_(window_size), offset_window_(0)
+		: is_writable_(is_write), path_(path), window_size_(window_size), pos_window_(0), offset_end(0)
 	{
 		std::ios_base::openmode flags;
-		if (is_write_) {
+		if (is_writable_) {
 			flags = std::ios::in | std::ios::out | std::ios::binary;
 		}
 		else {
@@ -68,21 +74,14 @@ public:
 			throw std::runtime_error("File does not exist or could not be opened for reading.");
 		}
 
-		file_size_ = get_size_file();
-		target_file_size_ = file_size_;
-
 		read();
 	}
 
 	explicit VectorFile(std::filesystem::path path, size_t file_size, size_t window_size = 1024)
-		: is_write_(true), path_(std::move(path)), file_size_(0), target_window_size_(window_size), offset_window_(0)
+		: is_writable_(true), path_(path), window_size_(window_size), pos_window_(0), offset_end(0)
 	{
-		target_file_size_ = align_filesize_to_typesize(file_size);
-
 		file_.open(path_, std::ios::in | std::ios::out | std::ios::binary | std::ios::trunc);
-
-		const size_t count_elem_for_filling = target_file_size_ > target_window_size_ ? target_window_size_ / S::get_size_element(file_) : target_file_size_ / S::get_size_element(file_);
-		filling(count_elem_for_filling);
+		resize(file_size);
 		read();
 	}
 
@@ -92,19 +91,15 @@ public:
 		{
 			return;
 		}
-		if (is_write_)
-		{
-			write();
-		}
-		if (target_file_size_ > file_size_)
-		{
-			filling((target_file_size_ - file_size_) / S::get_size_element(file_));
-		}
-		if (file_size(path_) > target_file_size_)
-		{
-			file_.close();
-			resize_file(path_, target_file_size_);
-		}
+		//if (is_writable_)
+		//{
+		//	write();
+		//}
+
+		std::streamsize file_size = get_size_file();
+
+		file_.close();
+		resize_file(path_, file_size);
 	}
 
 	VectorFile(VectorFile&&) noexcept = default;
@@ -112,46 +107,38 @@ public:
 	VectorFile(const VectorFile&) = delete;
 	VectorFile& operator=(const VectorFile&) = delete;
 
-	size_t size_buffer() const noexcept
+
+	size_t file_len() noexcept
 	{
-		return buffer_.size();
+		return get_size_file();
 	}
 
-	size_t size_file() const noexcept
+	size_t size()
 	{
-		return target_file_size_;
+		return get_number_elem(0, get_size_file());
 	}
 
-	void seek_window(size_t amount_elements)
+	void seek_window(size_t number_element)
 	{
-		if (amount_elements * S::get_size_element(file_) >= target_file_size_)
+		if (is_writable_)
 		{
-			throw goind_out_of_file();
+			write(buffer_, pos_window_);
 		}
-		if (amount_elements * S::get_size_element(file_) >= file_size_)
-		{
-			const size_t count_elem_for_filling = amount_elements * S::get_size_element(file_) + target_window_size_ < target_file_size_ ? amount_elements * S::get_size_element(file_) - file_size_ + target_window_size_ : target_file_size_ - file_size_;
-			filling(count_elem_for_filling);
-		}
-		if (is_write_)
-		{
-			write();
-		}
-		offset_window_ = static_cast<off_t>(amount_elements * S::get_size_element(file_));
+		pos_window_ = get_pos_elem(0, number_element);
+		std::streamsize file_size = get_size_file();
 		read();
 	}
 
 	T& operator[](size_t index)
 	{
-		if (index < 0 || target_file_size_ / S::get_size_element(file_) <= index)
+		const std::streampos pos_element = get_pos_elem(0, index);
+		file_.clear();
+		file_.seekp(pos_element, std::ios::beg);
+		const std::streampos size_element = S::deserialization_size_element(file_);
+
+		if (pos_element >= pos_window_ && pos_element + size_element < pos_window_ + window_size_)
 		{
-			throw goind_out_of_file();
-		}
-		const size_t index_first_elem = offset_window_ / S::get_size_element(file_);
-		const size_t window_space = target_file_size_ - offset_window_ >= target_window_size_ ? target_window_size_ : target_file_size_ - offset_window_;
-		if (index_first_elem <= index && index <= index_first_elem + window_space - 1)
-		{
-			return buffer_[index - index_first_elem];
+			return buffer_[get_number_elem(pos_window_, pos_element - pos_window_)];
 		}
 		seek_window(index);
 		return buffer_[0];
@@ -159,73 +146,70 @@ public:
 
 	void flush()
 	{
-		if (!is_write_)
+		if (!is_writable_)
 		{
 			throw write_error();
 		}
-		write();
+		write(buffer_, pos_window_);
 	}
 
 	void push_back(const T& value)
 	{
-		if (!is_write_)
+		if (!is_writable_)
 		{
 			throw write_error();
 		}
-		if (buffer_.size() < target_window_size_ / S::get_size_element(file_))
+
+		const std::streamsize file_size = get_size_file();
+		file_.clear();
+		file_.seekp(file_size, std::ios::beg);
+		const std::streampos pos_new_elem = file_.tellp();
+		S::serialization(file_, value);
+		const std::streamsize size_new_elem = S::get_size_element(value);
+
+		if (pos_new_elem >= pos_window_ && pos_new_elem + size_new_elem < pos_window_ + window_size_)
 		{
 			buffer_.push_back(value);
 		}
-		if (target_file_size_ - file_size_ > 0)
-		{
-			filling((target_file_size_ - file_size_) / S::get_size_element(file_));
-		}
-		file_.clear();
-		file_.seekp(target_file_size_, std::ios::beg);
-		file_.write(reinterpret_cast<const char*>(&value), S::get_size_element(file_));
-		target_file_size_ += S::get_size_element(file_);
-		file_size_ += S::get_size_element(file_);
+		offset_end = offset_end < size_new_elem ? 0 : offset_end - size_new_elem;
 	}
 
-	T pop_back() {
-		T obj;
-		if (!is_write_)
+	T pop_back()
+	{
+		if (!is_writable_)
 		{
 			throw write_error();
 		}
-		if (target_file_size_ < S::get_size_element(file_))
-		{
-			throw goind_out_of_file();
-		}
-		if (target_file_size_ - offset_window_ <= target_window_size_ && buffer_.size() <= (target_file_size_ - offset_window_) / S::get_size_element(file_))
+
+		T value;
+		const size_t index_last_elem = size() - 1;
+		const std::streampos pos_last_elem =  get_pos_elem(0, index_last_elem);
+
+		file_.clear();
+		file_.seekg(pos_last_elem,  std::ios::beg);
+		S::deserialization(file_, value);
+		const std::streamsize size_elem = S::get_size_element(value);
+
+		if (pos_last_elem >= pos_window_ && pos_last_elem + size_elem < pos_window_ + window_size_)
 		{
 			buffer_.pop_back();
 		}
-		if (target_file_size_ - file_size_ > 0)
-		{
-			filling((target_file_size_ - file_size_) / S::get_size_element(file_));
-		}
-		file_.clear();
-		file_.seekg(target_file_size_ - S::get_size_element(file_), std::ios::beg);
-		file_.read(reinterpret_cast<char*>(&obj), S::get_size_element(file_));
-		target_file_size_ -= S::get_size_element(file_);
-		file_size_ -= S::get_size_element(file_);
+		offset_end += size_elem;
 
-		return obj;
+		return value;
 	}
 
-	void resize(size_t new_file_size)
+	void resize(const std::streamsize new_file_size)
 	{
-		size_t old_file_size = target_file_size_;
-		target_file_size_ = align_filesize_to_typesize(new_file_size);
+		const std::streamsize file_size = get_size_file();
 
-		if (new_file_size >= old_file_size)
+		if (new_file_size > file_size)
 		{
-			return;
+			filling(new_file_size);
 		}
-		if (file_size_ > new_file_size)
+		else if (new_file_size < file_size)
 		{
-			file_size_ = new_file_size;
+			liberation(new_file_size);
 		}
 	}
 
@@ -252,7 +236,7 @@ public:
 
 		FileIterator& operator++()
 		{
-			pos_ += S::get_size_element(file_);
+			pos_ += S::deserialization_size_element(file_);
 			return *this;
 		}
 
@@ -269,132 +253,257 @@ public:
 		}
 	};
 
-	FileIterator begin()
+	[[nodiscard]] FileIterator begin()
 	{
 		return FileIterator(file_, 0);
 	}
 
-	FileIterator end()
+	[[nodiscard]] FileIterator end()
 	{
-		return FileIterator(file_, file_size_);
+		return FileIterator(file_, get_size_file());
 	}
 
-	const FileIterator begin() const
+	[[nodiscard]] const FileIterator begin() const
 	{
 		return FileIterator(file_, 0);
 	}
 
-	const FileIterator end() const
+	[[nodiscard]] const FileIterator end() const
 	{
-		return FileIterator(file_, file_size_);
+		return FileIterator(file_, get_size_file());
 	}
 
-	void shift(const std::streampos old_pos, const std::streampos new_pos)
-	{
-		std::vector<T> temp_buffer;
-		read(temp_buffer, old_pos, file_size_ - old_pos);
-		write(temp_buffer, new_pos);
-		file_size_ += new_pos - old_pos;
-		if (file_size_ > target_file_size_)
-		{
-			target_file_size_ = file_size_;
-		}
-	}
+
 
 private:
 
-	void read()
-	{
-		read(buffer_, offset_window_, target_window_size_);
-
-		//buffer_.clear();
-		//file_.clear();
-		//file_.seekg(offset_window_, std::ios::beg);
-		//size_t offset = offset_window_;
-		//while (true)
-		//{
-		//	offset += S::get_size_element(file_);
-		//	if (offset > offset_window_ + target_window_size_ || offset > file_size_)
-		//	{
-		//		break;
-		//	}
-		//	T obj;
-		//	S::deserialization(file_, obj);
-		//	buffer_.push_back(obj);
-		//}
-	}
-
-	void write()
-	{
-		write(buffer_, offset_window_);
-
-		//file_.clear();
-		//file_.seekp(offset_window_, std::ios::beg);
-		//for (size_t i = 0; i < buffer_.size(); i++)
-		//{
-		//	S::serialization(file_, buffer_[i]);
-		//}
-	}
-
-	//--------------------------------------------------------------------------------------------------------------------------------------//
-
-	void read(std::vector<T>& buffer, const std::streampos start_pos, const std::streampos range)
+	void read(std::vector<T>& buffer, const std::streampos start_pos, const std::streamsize range)
 	{
 		buffer.clear();
-		file_.clear();
-		file_.seekg(start_pos, std::ios::beg);
+		const std::streamsize file_size = get_size_file();
 		std::streampos offset = start_pos;
 
 		while (true)
 		{
-			offset += S::get_size_element(file_);
-			if (offset > start_pos + range || offset > file_size_)
+			if (offset == file_size)
+			{
+				break;
+			}
+			file_.clear();
+			file_.seekg(offset, std::ios::beg);
+			const std::streamsize elem_size = S::deserialization_size_element(file_);
+			if (offset + elem_size > start_pos + range)
 			{
 				break;
 			}
 			T obj;
+			file_.clear();
+			file_.seekg(offset, std::ios::beg);
 			S::deserialization(file_, obj);
 			buffer.push_back(obj);
+			offset += elem_size;
 		}
 	}
 
-	void write(std::vector<T>& buffer, const std::streampos start_pos)
+	void write(std::vector<T>& buffer, const std::streamsize start_pos)
 	{
-		file_.clear();
-		file_.seekp(start_pos, std::ios::beg);
+		const std::streamsize file_size = get_size_file();
+		std::streampos offset = start_pos;
+
 		for (size_t i = 0; i < buffer.size(); i++)
 		{
-			S::serialization(file_, buffer[i]);
+			file_.clear();
+			file_.seekp(offset, std::ios::beg);
+			const std::streamsize elem_size = S::deserialization_size_element(file_);
+
+			if (S::get_size_element(buffer[i]) == elem_size)
+			{
+				file_.clear();
+				file_.seekp(offset, std::ios::beg);
+				S::serialization(file_, buffer[i]);
+				offset += elem_size;
+			}
 		}
 	}
 
+	void read()
+	{
+		read(buffer_, pos_window_, window_size_);
+	}
 
+	void write()
+	{
+		write(buffer_, pos_window_);
+	}
+
+	//void shift(const std::streampos old_pos, const std::streampos new_pos)
+	//{
+	//	std::vector<T> temp_buffer;
+	//	read(temp_buffer, old_pos, get_size_file() - old_pos);
+	//	warite(temp_buffer, new_pos);
+	//}
+
+	//void shift_sliding_window()
+	//{
+	//	std::streampos offset = pos_window_;
+
+	//	file_.clear();
+	//	file_.seekg(offset, std::ios::beg);
+
+	//	std::streamsize current_buffer_len = 0;
+	//	std::streamsize new_buffer_len = 0;
+	//	for (const auto iter& : buffer_)
+	//	{
+	//		new_buffer_len += S::get_size_element(iter);
+	//		std::streamsize size_element = S::deserialization_size_element(file_);
+	//		current_buffer_len += size_element;
+	//		file_.seekp(size_element, std::ios::cur);
+	//	}
+	//	offset += current_buffer_len;
+
+	//	enum class Direction
+	//	{
+	//		nothing, extention, constriction
+	//	};
+
+	//	Direction status;
+	//	std::streamsize shift;
+
+	//	if (new_buffer_len > current_buffer_len)
+	//	{
+	//		status = Direction::extention;
+	//		shift = new_buffer_len - current_buffer_len;
+	//	}
+	//	else if (new_buffer_len < current_buffer_len)
+	//	{
+	//		status = Direction::constriction;
+	//		shift = current_buffer_len - new_buffer_len;
+	//	}
+	//	else
+	//	{
+	//		status = Direction::nothing;
+	//		shift = 0;
+	//	}
+
+	//	std::streamsize file_size = size_file_bytes();
+
+	//	switch (status)
+	//	{
+	//	case Direction::nothing:
+	//	{
+	//		write(buffer_, offset);
+	//		break;
+	//	}
+
+	//	case Direction::extention:
+	//	{
+	//		std::streamsize current_len = 0;
+	//		std::vector<const T> sliding_buffer;
+
+	//		while (offset < file_size)
+	//		{
+
+
+	//			do {
+	//				current_len = S::deserialization_size_element(file_);
+
+
+	//			} while (current_len > shift);
+
+	//			read(sliding_buffer, offset, current_len);
+
+	//			offset += current_len;
+
+	//		}
+
+
+	//		break;
+	//	}
+
+	//	case Direction::constriction:
+	//		break;
+	//	}
+	//}
 
 	//--------------------------------------------------------------------------------------------------------------------------------------//
 
+	std::streampos get_pos_elem(std::streampos start_pos, size_t index_elem)
+	{
+		const std::streamsize file_size = get_size_file();
+		std::streampos offset = start_pos;
+		size_t count = 0;
 
-	size_t get_size_file()
+		while (true)
+		{
+			if (count == index_elem)
+			{
+				break;
+			}
+			file_.clear();
+			file_.seekg(offset, std::ios::beg);
+			std::streamsize size_element = S::deserialization_size_element(file_);
+			if (offset + size_element > file_size)
+			{
+				throw goind_out_of_file();
+			}
+			offset += size_element;
+			count++;
+		}
+		return offset;
+	}
+
+	size_t get_number_elem(const std::streampos start_pos, const std::streamsize range)
+	{
+		const std::streamsize file_size = get_size_file();
+		std::streampos offset = start_pos;
+		size_t count = 0;
+
+		while (offset != file_size)
+		{
+			if (offset > file_size)
+			{
+				throw goind_out_of_file();
+			}
+			file_.clear();
+			file_.seekg(offset, std::ios::beg);
+			std::streamsize size_element = S::deserialization_size_element(file_);
+			if (offset + size_element > start_pos + range)
+			{
+				break;
+			}
+			offset += size_element;
+			count++;
+		}
+		return count;
+	}
+
+	std::streamsize get_size_file() noexcept
 	{
 		file_.seekg(0, std::ios::end);
-		const size_t file_size = file_.tellg();
+		const std::streamsize file_size = file_.tellg();
 		file_.seekg(0, std::ios::beg);
-		return file_size;
+		return file_size - offset_end;
 	}
 
-	void filling(const size_t number_elem)
+	void filling(std::streamsize target_file_size)
 	{
-		file_.clear();
-		file_.seekp(0, std::ios::end);
-
-		for (size_t i = 0; i < number_elem * S::get_size_element(file_); i++)
+		const std::streamsize range = target_file_size - get_size_file();
+		T value;
+		const std::streamsize size_elem = S::get_size_element(value);
+		std::streamsize current_fullness = 0;
+		
+		while (current_fullness + size_elem <= range)
 		{
-			file_.write("\0", 1);
+			this->push_back(value);
+			current_fullness += size_elem;
 		}
-		file_size_ += number_elem * S::get_size_element(file_);
 	}
 
-	size_t align_filesize_to_typesize(size_t original_file_size) const
+	void liberation(std::streamsize target_file_size)
 	{
-		return original_file_size / S::get_size_element(file_) * S::get_size_element(file_);
+		while (get_size_file() < target_file_size)
+		{
+			this->pop_back();
+		}
 	}
 };
