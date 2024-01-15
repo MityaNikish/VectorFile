@@ -2,19 +2,6 @@
 #include "VectorFile.hpp"
 
 
-
-//template <class T>
-//void goo(T&& value)
-//{
-//	char* ptr = reinterpret_cast<char*>(&value);
-//}
-//
-//template <class T>
-//void foo(T&& value)
-//{
-//	goo(value);
-//}
-
 template <typename T>
 struct SerializerVector
 {
@@ -37,14 +24,14 @@ struct SerializerVector
 		}
 	}
 
-	static size_t deserialization_size_element(std::fstream& file)
+	static std::streamsize deserialization_size_element(std::fstream& file)
 	{
 		size_t size;
 		file.read(reinterpret_cast<char*>(&size), sizeof(size_t));
 		return sizeof(size_t) + size * sizeof(T);
 	}
 
-	static size_t get_size_element(const std::vector<T>& elem)
+	static std::streamsize get_size_element(const std::vector<T>& elem)
 	{
 		return sizeof(size_t) + elem.size() * sizeof(T);
 	}
@@ -111,13 +98,42 @@ int main()
 		{
 			vec.pop_back();
 		}
+		std::cout << vec.size() << "\n" << vec.file_len() << "\n" << std::endl;
 		print_vector_file(vec);
 	}
 	{
 		VectorFile<std::vector<int>, SerializerVector<int>> vec(p);
+		std::cout << vec.size() << "\n" << vec.file_len() << "\n" << std::endl;
 		print_vector_file(vec);
 	}
 	std::filesystem::remove(p);
+
+	{
+		VectorFile<std::vector<int>, SerializerVector<int>> vec(p, static_cast<size_t>(500));
+
+		std::cout << vec.size() << "\n" << vec.file_len() << "\n" << std::endl;
+		print_vector_file(vec);
+
+		for (auto i = 0; i < vec.size(); i++)
+		{
+			vec[i].push_back(10);
+			vec[i].push_back(7);
+		}
+		vec.flush();
+
+		vec.pop_back();
+
+		std::cout << vec.size() << "\n" << vec.file_len() << "\n" << std::endl;
+		print_vector_file(vec);
+	}
+	{
+		VectorFile<std::vector<int>, SerializerVector<int>> vec(p);
+
+		std::cout << vec.size() << "\n" << vec.file_len() << "\n" << std::endl;
+		print_vector_file(vec);
+	}
+	std::filesystem::remove(p);
+
 	return 0;
 }
 
